@@ -1,0 +1,152 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id             Int            @id @default(autoincrement())
+  username       String         @unique
+  password       String
+  displayName    String         @map("display_name")
+  bio            String?
+  avatarUrl      String?        @map("avatar_url")
+  coverUrl       String?        @map("cover_url")
+  createdAt      DateTime?      @default(now()) @map("created_at")
+  posts          Post[]
+  comments       Comment[]
+  likes          Like[]
+  reposts        Repost[]
+  followers      Follow[]       @relation("follower")
+  following      Follow[]       @relation("following")
+  blocksMade     Block[]        @relation("blocker")
+  blocksReceived Block[]        @relation("blocked")
+  convPart1      Conversation[] @relation("participant1")
+  convPart2      Conversation[] @relation("participant2")
+  messagesSent   Message[]
+  boards         Board[]
+
+  @@map("users")
+}
+
+model Post {
+  id              Int       @id @default(autoincrement())
+  userId          Int       @map("user_id")
+  content         String
+  fontStyle       String?   @default("Inter") @map("font_style")
+  backgroundColor String?   @default("#ffffff") @map("background_color")
+  originalPostId  Int?      @map("original_post_id")
+  createdAt       DateTime? @default(now()) @map("created_at")
+
+  author         User      @relation(fields: [userId], references: [id])
+  originalPost   Post?     @relation("Reposts", fields: [originalPostId], references: [id])
+  repostedBy     Post[]    @relation("Reposts")
+  comments       Comment[]
+  likes          Like[]
+  repostsAsTable Repost[]
+
+  @@map("posts")
+}
+
+model Comment {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  postId    Int       @map("post_id")
+  content   String
+  createdAt DateTime? @default(now()) @map("created_at")
+
+  author User @relation(fields: [userId], references: [id])
+  post   Post @relation(fields: [postId], references: [id])
+
+  @@map("comments")
+}
+
+model Like {
+  id     Int @id @default(autoincrement())
+  userId Int @map("user_id")
+  postId Int @map("post_id")
+
+  user User @relation(fields: [userId], references: [id])
+  post Post @relation(fields: [postId], references: [id])
+
+  @@map("likes")
+}
+
+model Repost {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  postId    Int       @map("post_id")
+  content   String?
+  createdAt DateTime? @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+  post Post @relation(fields: [postId], references: [id])
+
+  @@map("reposts")
+}
+
+model Follow {
+  id          Int @id @default(autoincrement())
+  followerId  Int @map("follower_id")
+  followingId Int @map("following_id")
+
+  follower  User @relation("follower", fields: [followerId], references: [id])
+  following User @relation("following", fields: [followingId], references: [id])
+
+  @@map("follows")
+}
+
+model Block {
+  id        Int @id @default(autoincrement())
+  blockerId Int @map("blocker_id")
+  blockedId Int @map("blocked_id")
+
+  blocker User @relation("blocker", fields: [blockerId], references: [id])
+  blocked User @relation("blocked", fields: [blockedId], references: [id])
+
+  @@map("blocks")
+}
+
+model Conversation {
+  id             Int       @id @default(autoincrement())
+  participant1Id Int       @map("participant1_id")
+  participant2Id Int       @map("participant2_id")
+  lastMessageAt  DateTime? @default(now()) @map("last_message_at")
+  missedCallFrom Int?      @map("missed_call_from")
+
+  participant1 User      @relation("participant1", fields: [participant1Id], references: [id])
+  participant2 User      @relation("participant2", fields: [participant2Id], references: [id])
+  messages     Message[]
+
+  @@map("conversations")
+}
+
+model Message {
+  id             Int       @id @default(autoincrement())
+  conversationId Int       @map("conversation_id")
+  senderId       Int       @map("sender_id")
+  content        String
+  read           Boolean?  @default(false)
+  createdAt      DateTime? @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  sender       User         @relation(fields: [senderId], references: [id])
+
+  @@map("messages")
+}
+
+model Board {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  title     String
+  elements  String?   @default("[]")
+  appState  String?   @default("{}") @map("app_state")
+  createdAt DateTime? @default(now()) @map("created_at")
+  updatedAt DateTime? @default(now()) @map("updated_at")
+
+  author User @relation(fields: [userId], references: [id])
+
+  @@map("boards")
+}

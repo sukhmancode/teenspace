@@ -1,0 +1,226 @@
+Build a professional-looking social media web app focused only on text-based posts for sharing thoughts (no images, no videos, no files). The UI should feel modern, clean, and responsive (mobile + desktop), similar to a simple Twitter-like platform but more minimal and polished.
+
+Core Concept
+
+Users can create and share only text posts (thoughts). Each post should support:
+
+Like / Unlike
+
+Comment
+
+Forward / Repost / Share
+
+Save / Bookmark (optional but recommended)
+
+Report (recommended)
+
+Required Features (Must Have)
+1) Authentication & Users
+
+User signup / login / logout
+
+Password hashing + secure sessions / JWT
+
+User profile page with:
+
+name, username, bio
+
+profile photo (optional)
+
+followers/following count
+
+list of posts, reposts, liked posts
+
+2) Posting System (Text Only)
+
+Create post with:
+
+text content
+
+character limit (ex: 280 or 500)
+
+timestamp
+
+Edit & delete own posts
+
+Posts should display:
+
+username + profile icon
+
+time posted (relative: “2h ago”)
+
+like count, comment count, forward count
+
+3) Feed / Timeline
+
+Home feed shows posts from:
+
+people the user follows
+
+optionally “recommended” posts from public users
+
+Sorting:
+
+Latest (default)
+
+Popular (optional)
+
+4) Likes / Comments / Forwarding
+
+Like/unlike any public post
+
+Comment thread under posts (nested replies optional)
+
+Forward feature:
+
+user can repost someone’s post
+
+optionally add a short text while forwarding
+
+5) Follow System
+
+Follow & unfollow users
+
+Followers/following list pages
+
+Feed depends on follow relationships
+
+6) Blocking
+
+Block/unblock users
+
+If blocked:
+
+they can’t view your profile
+
+they can’t message you
+
+their posts should disappear from your feed
+
+7) Chat / Messaging
+
+Private 1-to-1 messaging
+
+Message requests optional
+
+Real-time chat preferred (WebSockets / Socket.IO)
+
+Must support:
+
+send text messages
+
+show last seen or message timestamps
+
+show conversation list
+
+8) Settings
+
+Create a settings page that includes:
+
+profile edit settings
+
+privacy settings: public/private profile
+
+notification settings
+
+account settings: change password, logout, delete account
+
+Custom Design Feature (Important)
+
+Each post should allow styling options when writing it:
+
+user can select a font style from a dropdown (e.g. Inter, Roboto, Georgia, Times New Roman)
+
+user can choose the background color of that post (color picker or preset colors)
+
+text color should auto-adjust for readability
+
+styling applies ONLY to the appearance of the post, not the database formatting
+
+Must remain professional, not cartoonish
+
+Admin / Moderation (Recommended)
+
+Admin role can:
+
+delete posts
+
+ban users
+
+view reports
+
+Reporting system for posts/comments (basic version ok)
+
+Tech Requirements (Pick one stack and implement fully)
+
+Use a modern full-stack setup and organize files clearly.
+
+✅ Preferred Stack (choose this if possible):
+
+Frontend: React + Tailwind CSS
+
+Backend: Node.js + Express
+
+Database: PostgreSQL (or SQLite if easier for Replit)
+
+Auth: JWT + refresh token or secure sessions
+
+Realtime chat: Socket.IO
+
+Alternative acceptable stack:
+
+Next.js (full stack) with Prisma + PostgreSQL
+
+Database Models (Must Include)
+
+Design proper DB tables/models for:
+
+users
+
+posts
+
+comments
+
+likes
+
+forwards/reposts
+
+follows
+
+blocks
+
+chats/conversations
+
+messages
+
+notifications (optional)
+
+UI Expectations
+
+Use a professional theme (clean spacing, icons, consistent typography)
+
+Responsive layout:
+
+left sidebar menu (Home, Explore, Messages, Profile, Settings)
+
+center feed
+
+right sidebar (trending/recommendations optional)
+
+Add loading states, toasts, and empty states
+
+Form validations and error messages
+
+Deliverables Required
+
+Provide full codebase with clear folder structure
+
+Provide setup/run instructions inside a README
+
+Ensure all features work end-to-end
+
+Seed demo users/posts for testing
+
+Add comments in code for clarity
+
+Build this as a working MVP first, then enhance UI/UX after base features are stable.

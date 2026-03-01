@@ -1,0 +1,487 @@
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import { storage } from "./storage";
+import { api } from "@shared/routes";
+import { z } from "zod";
+import session from "express-session";
+import passport from "passport";
+import { Strategy as LocalStrategy } from "passport-local";
+import { hashPassword, comparePasswords } from "./auth";
+import pgSession from "connect-pg-simple";
+import { pool } from "./db";
+import { WebSocketServer, WebSocket } from "ws";
+import { ExpressPeerServer } from "peer";
+import { db } from "./db";
+import { users, posts, conversations, messages, type User as SchemaUser } from "@shared/schema";
+import { eq, desc } from "drizzle-orm";
+
+declare module 'express-serve-static-core' {
+  interface Request {
+    user?: SchemaUser;
+  }
+}
+
+export async function registerRoutes(
+  httpServer: Server,
+  app: Express
+): Promise<Server> {
+  // === PEER SERVER SETUP ===
+  const peerServer = ExpressPeerServer(httpServer, {
+    path: "/"
+  });
+  app.use("/peerjs", peerServer);
+
+  // === AUTH SETUP ===
+  const PostgresqlStore = pgSession(session);
+  const sessionStore = new PostgresqlStore({
+    pool,
+    createTableIfMissing: true,
+  });
+
+  app.use(
+    session({
+      secret: process.env.SESSION_SECRET || "secret",
+      resave: false,
+      saveUninitialized: false,
+      store: sessionStore,
+      cookie: {
+        secure: app.get("env") === "production",
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      },
+    })
+  );
+
+  app.use(passport.initialize());
+  app.use(passport.session());
+
+  passport.use(
+    new LocalStrategy(async (username, password, done) => {
+      try {
+        const user = await storage.getUserByUsername(username);
+        if (!user) {
+          return done(null, false, { message: "Incorrect username." });
+        }
+        const isValid = await comparePasswords(password, user.password);
+        if (!isValid) {
+          return done(null, false, { message: "Incorrect password." });
+        }
+        return done(null, user);
+      } catch (err) {
+        return done(err);
+      }
+    })
+  );
+
+  passport.serializeUser((user: any, done) => {
+    done(null, user.id);
+  });
+
+  passport.deserializeUser(async (id: number, done) => {
+    try {
+      const user = await storage.getUser(id);
+      done(null, user);
+    } catch (err) {
+      done(err);
+    }
+  });
+
+  // Auth Middleware
+  const isAuthenticated = (req: any, res: any, next: any) => {
+    if (req.isAuthenticated()) {
+      return next();
+    }
+    res.status(401).json({ message: "Unauthorized" });
+  };
+
+  // === ROUTES ===
+
+  // Auth
+  app.post(api.auth.register.path, async (req, res, next) => {
+    try {
+      const input = api.auth.register.input.parse(req.body);
+      const existing = await storage.getUserByUsername(input.username);
+      if (existing) {
+        return res.status(400).json({ message: "Username already exists" });
+      }
+
+      const hashedPassword = await hashPassword(input.password);
+      const user = await storage.createUser({ ...input, password: hashedPassword });
+
+      req.login(user, (err) => {
+        if (err) return next(err);
+        res.status(201).json({ id: user.id, username: user.username });
+      });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+      } else {
+        next(err);
+      }
+    }
+  });
+
+  app.post(api.auth.login.path, passport.authenticate("local"), (req, res) => {
+    const user = req.user as SchemaUser;
+    res.status(200).json({ id: user.id, username: user.username });
+  });
+
+  app.post(api.auth.logout.path, (req, res, next) => {
+    req.logout((err) => {
+      if (err) return next(err);
+      res.sendStatus(200);
+    });
+  });
+
+  app.get(api.auth.me.path, (req, res) => {
+    if (req.isAuthenticated()) {
+      const { password, ...userWithoutPassword } = req.user as any;
+      res.json(userWithoutPassword);
+    } else {
+      res.json(null);
+    }
+  });
+
+  // Users
+  app.get(api.users.search.path, isAuthenticated, async (req: any, res) => {
+    const q = req.query.q as string;
+    if (!q) return res.json([]);
+    const users = await storage.searchUsers(q);
+    res.json(users);
+  });
+
+  app.patch("/api/users/:id", isAuthenticated, async (req: any, res) => {
+    const userId = Number(req.params.id);
+    if ((req.user as any).id !== userId) return res.status(403).json({ message: "Forbidden" });
+
+    const [updatedUser] = await db.update(users)
+      .set(req.body)
+      .where(eq(users.id, userId))
+      .returning();
+
+    res.json(updatedUser);
+  });
+
+  app.patch("/api/conversations/:id/missed-call", isAuthenticated, async (req: any, res) => {
+    const convId = Number(req.params.id);
+    const { fromId } = req.body;
+    await db.update(conversations)
+      .set({ missedCallFrom: fromId })
+      .where(eq(conversations.id, convId));
+    res.sendStatus(200);
+  });
+
+  app.patch("/api/conversations/:id/clear-missed-call", isAuthenticated, async (req: any, res) => {
+    const convId = Number(req.params.id);
+    await db.update(conversations)
+      .set({ missedCallFrom: null })
+      .where(eq(conversations.id, convId));
+    res.sendStatus(200);
+  });
+
+  app.get(api.users.get.path, isAuthenticated, async (req: any, res) => {
+    const user = await storage.getUserByUsername(req.params.username);
+    if (!user) {
+      // Try fuzzy search or case-insensitive if not found exactly
+      const allUsers = await db.select().from(users);
+      const fuzzyUser = allUsers.find(u => u.username.toLowerCase() === req.params.username.toLowerCase());
+      if (!fuzzyUser) return res.status(404).json({ message: "User not found" });
+
+      // Redirect or use fuzzyUser
+      const followers = await storage.getFollowers(fuzzyUser.id);
+      const following = await storage.getFollowing(fuzzyUser.id);
+      const userPosts = await db.select().from(posts).where(eq(posts.userId, fuzzyUser.id)).orderBy(desc(posts.createdAt));
+
+      return res.json({
+        ...fuzzyUser,
+        followerCount: followers.length,
+        followingCount: following.length,
+        followers,
+        following,
+        isFollowing: followers.some(f => f.id === (req.user as any).id),
+        posts: userPosts
+      });
+    }
+
+    // Add stats
+    const followers = await storage.getFollowers(user.id);
+    const following = await storage.getFollowing(user.id);
+    const userPosts = await db.select().from(posts).where(eq(posts.userId, user.id)).orderBy(desc(posts.createdAt));
+
+    const enriched = {
+      ...user,
+      followerCount: followers.length,
+      followingCount: following.length,
+      followers,
+      following,
+      isFollowing: followers.some(f => f.id === (req.user as any).id),
+      posts: userPosts
+    };
+
+    res.json(enriched);
+  });
+
+  app.post(api.users.follow.path, isAuthenticated, async (req: any, res) => {
+    await storage.followUser((req.user as any).id, Number(req.params.id));
+    res.sendStatus(200);
+  });
+
+  app.post(api.users.unfollow.path, isAuthenticated, async (req: any, res) => {
+    await storage.unfollowUser((req.user as any).id, Number(req.params.id));
+    res.sendStatus(200);
+  });
+
+  // Posts
+  app.get(api.posts.list.path, isAuthenticated, async (req: any, res) => {
+    const feed = (req.query.feed as 'latest' | 'following' | 'popular') || 'latest';
+    const posts = await storage.getPosts((req.user as any).id, feed);
+    res.json(posts);
+  });
+
+  app.post(api.posts.create.path, isAuthenticated, async (req: any, res) => {
+    const input = api.posts.create.input.parse(req.body);
+    const post = await storage.createPost({ ...input, userId: (req.user as any).id });
+
+    // Fetch details to return full object
+    const [fullPost] = await storage.getPosts((req.user as any).id, 'latest'); // Hack to get enriched post quickly
+    // Better: implement getPostWithDetails
+    res.status(201).json(fullPost || post);
+  });
+
+  app.delete(api.posts.delete.path, isAuthenticated, async (req: any, res) => {
+    const post = await storage.getPost(Number(req.params.id));
+    if (!post) return res.status(404).json({ message: "Not found" });
+    if (post.userId !== (req.user as any).id) return res.status(403).json({ message: "Forbidden" });
+
+    await storage.deletePost(post.id);
+    res.sendStatus(200);
+  });
+
+  app.post(api.posts.like.path, isAuthenticated, async (req: any, res) => {
+    await storage.likePost((req.user as any).id, Number(req.params.id));
+    res.json({ success: true });
+  });
+
+  app.post(api.posts.unlike.path, isAuthenticated, async (req: any, res) => {
+    await storage.unlikePost((req.user as any).id, Number(req.params.id));
+    res.json({ success: true });
+  });
+
+  app.post(api.posts.repost.path, isAuthenticated, async (req: any, res) => {
+    const input = req.body; // optional content
+    await storage.repostPost({
+      postId: Number(req.params.id),
+      userId: (req.user as any).id,
+      content: input.content
+    });
+    res.json({ success: true });
+  });
+
+  app.get(api.posts.getComments.path, isAuthenticated, async (req: any, res) => {
+    const comments = await storage.getComments(Number(req.params.id));
+    res.json(comments);
+  });
+
+  app.post(api.posts.addComment.path, isAuthenticated, async (req: any, res) => {
+    const input = api.posts.addComment.input.parse(req.body);
+    const comment = await storage.createComment({
+      ...input,
+      postId: Number(req.params.id),
+      userId: (req.user as any).id
+    });
+    const user = await storage.getUser((req.user as any).id);
+    res.status(201).json({ ...comment, author: user });
+  });
+
+  // Chat
+  app.get(api.chat.list.path, isAuthenticated, async (req: any, res) => {
+    const convs = await storage.getConversations((req.user as any).id);
+    res.json(convs);
+  });
+
+  app.post(api.chat.start.path, isAuthenticated, async (req: any, res) => {
+    const { participantId } = req.body;
+    if ((req.user as any).id === Number(participantId)) {
+      return res.status(400).json({ message: "You cannot message yourself" });
+    }
+    const conv = await storage.createConversation((req.user as any).id, Number(participantId));
+    res.status(201).json(conv);
+  });
+
+  app.get(api.chat.getMessages.path, isAuthenticated, async (req: any, res) => {
+    const msgs = await storage.getMessages(Number(req.params.id));
+    res.json(msgs);
+  });
+
+  app.post(api.chat.sendMessage.path, isAuthenticated, async (req: any, res) => {
+    const input = api.chat.sendMessage.input.parse(req.body);
+    const msg = await storage.createMessage({
+      ...input,
+      conversationId: Number(req.params.id),
+      senderId: (req.user as any).id
+    });
+
+    // Broadcast via WS
+    broadcastMessage(msg);
+
+    res.status(201).json(msg);
+  });
+
+  app.delete("/api/conversations/:id", isAuthenticated, async (req: any, res) => {
+    const convId = Number(req.params.id);
+    const conv = await db.select().from(conversations).where(eq(conversations.id, convId)).limit(1);
+    if (!conv.length) return res.status(404).json({ message: "Not found" });
+    if (conv[0].participant1Id !== (req.user as any).id && conv[0].participant2Id !== (req.user as any).id) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    await db.delete(messages).where(eq(messages.conversationId, convId));
+    await db.delete(conversations).where(eq(conversations.id, convId));
+    res.sendStatus(200);
+  });
+
+  // Boards
+  app.get("/api/boards", isAuthenticated, async (req: any, res) => {
+    const results = await storage.getBoards((req.user as any).id);
+    res.json(results);
+  });
+
+  app.post("/api/boards", isAuthenticated, async (req: any, res) => {
+    const { title } = req.body;
+    const board = await storage.createBoard({ userId: (req.user as any).id, title });
+    res.status(201).json(board);
+  });
+
+  app.get("/api/boards/:id", isAuthenticated, async (req: any, res) => {
+    const board = await storage.getBoard(Number(req.params.id));
+    if (!board) return res.status(404).json({ message: "Board not found" });
+    res.json(board);
+  });
+
+  app.patch("/api/boards/:id", isAuthenticated, async (req: any, res) => {
+    const board = await storage.updateBoard(Number(req.params.id), req.body);
+    res.json(board);
+  });
+
+  app.post("/api/conversations/:id/call-log", isAuthenticated, async (req: any, res) => {
+    const { type } = req.body;
+    const convId = Number(req.params.id);
+    let content = "Voice call ended";
+    if (type === 'missed') content = "Missed voice call";
+    if (type === 'missed_video') content = "Missed video call";
+    if (type === 'ended_video') content = "Video call ended";
+
+    const msg = await storage.createMessage({
+      conversationId: convId,
+      senderId: (req.user as any).id,
+      content
+    });
+    broadcastMessage(msg);
+    res.status(201).json(msg);
+  });
+
+  // === WEBSOCKET SETUP ===
+  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+
+  // Map userId to WebSocket connection
+  const clients = new Map<number, WebSocket>();
+  const boardRooms = new Map<number, Set<WebSocket>>();
+
+  wss.on('connection', (ws, req) => {
+    let currentBoardId: number | null = null;
+
+    ws.on('message', (data) => {
+      const message = JSON.parse(data.toString());
+
+      if (message.type === 'auth') {
+        const userId = message.userId;
+        clients.set(userId, ws);
+      }
+
+      if (message.type === 'join-board') {
+        const boardId = Number(message.boardId);
+        currentBoardId = boardId;
+        if (!boardRooms.has(boardId)) boardRooms.set(boardId, new Set());
+        boardRooms.get(boardId)!.add(ws);
+      }
+
+      if (message.type === 'board-update') {
+        if (currentBoardId && boardRooms.has(currentBoardId)) {
+          const room = boardRooms.get(currentBoardId)!;
+          const payload = JSON.stringify(message);
+          room.forEach(client => {
+            if (client !== ws && client.readyState === WebSocket.OPEN) {
+              client.send(payload);
+            }
+          });
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      // Remove from clients map
+      clients.forEach((socket, clientId) => {
+        if (socket === ws) clients.delete(clientId);
+      });
+
+      // Remove from board rooms
+      if (currentBoardId && boardRooms.has(currentBoardId)) {
+        boardRooms.get(currentBoardId)!.delete(ws);
+        if (boardRooms.get(currentBoardId)!.size === 0) {
+          boardRooms.delete(currentBoardId);
+        }
+      }
+    });
+  });
+
+  function broadcastMessage(msg: any) {
+    const payload = JSON.stringify({ type: 'message', message: msg });
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(payload);
+      }
+    });
+  }
+
+  // Seed Data
+  await seedDatabase();
+
+  return httpServer;
+}
+
+async function seedDatabase() {
+  const existing = await storage.getUserByUsername("demo");
+  if (!existing) {
+    const password = await hashPassword("password");
+    const demoUser = await storage.createUser({
+      username: "demo",
+      password,
+      displayName: "Demo User",
+      bio: "Just a demo user exploring this text-based world.",
+      avatarUrl: "https://api.dicebear.com/7.x/avataaars/svg?seed=demo"
+    });
+
+    const otherUser = await storage.createUser({
+      username: "alice",
+      password,
+      displayName: "Alice Wonderland",
+      bio: "Curiouser and curiouser!",
+      avatarUrl: "https://api.dicebear.com/7.x/avataaars/svg?seed=alice"
+    });
+
+    await storage.createPost({
+      userId: demoUser.id,
+      content: "Hello world! This is my first thought here.",
+      fontStyle: "Inter",
+      backgroundColor: "#ffffff"
+    });
+
+    await storage.createPost({
+      userId: otherUser.id,
+      content: "I love the minimalist vibe of this app. #clean",
+      fontStyle: "Lora",
+      backgroundColor: "#f0f9ff"
+    });
+
+    await storage.followUser(demoUser.id, otherUser.id);
+  }
+}
