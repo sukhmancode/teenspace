@@ -29,10 +29,14 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   // === PEER SERVER SETUP ===
-  const peerServer = ExpressPeerServer(httpServer, {
-    path: "/"
-  });
-  app.use("/peerjs", peerServer);
+  // Skip PeerJS in serverless environments (Vercel) - requires persistent TCP connections
+  const isServerless = !!process.env.VERCEL || process.env.NODE_ENV === 'production' && !process.env.PORT;
+  if (!isServerless) {
+    const peerServer = ExpressPeerServer(httpServer, {
+      path: "/"
+    });
+    app.use("/peerjs", peerServer);
+  }
 
   // === AUTH SETUP ===
   const PostgresqlStore = pgSession(session);
@@ -126,14 +130,14 @@ export async function registerRoutes(
 
   // Register middleware for tracking usage and checking lock status
   app.use("/api", trackUsage);
-  
+
   // Middleware to check usage limits for authenticated routes (but not auth endpoints)
   app.use((req: any, res: any, next: any) => {
     // Skip auth endpoints
     if (req.path.match(/^\/api\/auth\/.*/)) {
       return next();
     }
-    
+
     // For all other endpoints, check if authenticated and not locked
     if (!req.isAuthenticated()) {
       return res.status(401).json({ message: "Unauthorized" });
@@ -164,11 +168,11 @@ export async function registerRoutes(
 
       req.login(user, async (err) => {
         if (err) return next(err);
-        
+
         // Initialize daily usage and start tracking session
         await UsageService.resetIfNewDay(user.id);
         UsageService.startSession(user.id);
-        
+
         res.status(201).json({ id: user.id, username: user.username });
       });
     } catch (err) {
@@ -182,25 +186,25 @@ export async function registerRoutes(
 
   app.post(api.auth.login.path, passport.authenticate("local"), async (req, res) => {
     const user = req.user as SchemaUser;
-    
+
     // Reset usage if it's a new day and start tracking session
     await UsageService.resetIfNewDay(user.id);
     UsageService.startSession(user.id);
-    
+
     res.status(200).json({ id: user.id, username: user.username });
   });
 
   app.post(api.auth.logout.path, (req, res, next) => {
     const userId = (req.user as any)?.id;
-    
+
     req.logout((err) => {
       if (err) return next(err);
-      
+
       // End tracking session
       if (userId) {
         UsageService.endSession(userId);
       }
-      
+
       res.sendStatus(200);
     });
   });
@@ -239,7 +243,7 @@ export async function registerRoutes(
     try {
       const userId = (req.user as any).id;
       const success = await StudyModeService.enableStudyMode(userId);
-      
+
       if (success) {
         res.json({ message: "Study mode enabled", studyModeEnabled: true });
       } else {
@@ -255,7 +259,7 @@ export async function registerRoutes(
     try {
       const userId = (req.user as any).id;
       const success = await StudyModeService.disableStudyMode(userId);
-      
+
       if (success) {
         res.json({ message: "Study mode disabled", studyModeEnabled: false });
       } else {
@@ -271,8 +275,8 @@ export async function registerRoutes(
     try {
       const userId = (req.user as any).id;
       const isEnabled = await StudyModeService.isStudyModeEnabled(userId);
-      
-      res.json({ 
+
+      res.json({
         studyModeEnabled: isEnabled,
         allowedCategories: StudyModeService.STUDY_MODE_ALLOWED_CATEGORIES
       });
@@ -582,70 +586,75 @@ export async function registerRoutes(
   });
 
   // === WEBSOCKET SETUP ===
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  // Skip WebSocket setup in serverless environments (Vercel) - requires persistent connections
+  let broadcastMessage: (msg: any) => void = (_msg: any) => { }; // no-op by default
 
-  // Map userId to WebSocket connection
-  const clients = new Map<number, WebSocket>();
-  const boardRooms = new Map<number, Set<WebSocket>>();
+  if (!isServerless) {
+    const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
-  wss.on('connection', (ws, req) => {
-    let currentBoardId: number | null = null;
+    // Map userId to WebSocket connection
+    const clients = new Map<number, WebSocket>();
+    const boardRooms = new Map<number, Set<WebSocket>>();
 
-    ws.on('message', (data) => {
-      const message = JSON.parse(data.toString());
+    wss.on('connection', (ws, req) => {
+      let currentBoardId: number | null = null;
 
-      if (message.type === 'auth') {
-        const userId = message.userId;
-        console.log(`WS: User ${userId} authenticated`);
-        clients.set(userId, ws);
-      }
+      ws.on('message', (data) => {
+        const message = JSON.parse(data.toString());
 
-      if (message.type === 'join-board') {
-        const boardId = Number(message.boardId);
-        currentBoardId = boardId;
-        console.log(`WS: User joined board ${boardId}`);
-        if (!boardRooms.has(boardId)) boardRooms.set(boardId, new Set());
-        boardRooms.get(boardId)!.add(ws);
-      }
-
-      if (message.type === 'board-update') {
-        console.log(`WS: Board ${currentBoardId} update received`);
-        if (currentBoardId && boardRooms.has(currentBoardId)) {
-          const room = boardRooms.get(currentBoardId)!;
-          console.log(`WS: Broadcasting update to ${room.size - 1} other clients`);
-          const payload = JSON.stringify(message);
-          room.forEach(client => {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
-              client.send(payload);
-            }
-          });
+        if (message.type === 'auth') {
+          const userId = message.userId;
+          console.log(`WS: User ${userId} authenticated`);
+          clients.set(userId, ws);
         }
-      }
-    });
 
-    ws.on('close', () => {
-      // Remove from clients map
-      clients.forEach((socket, clientId) => {
-        if (socket === ws) clients.delete(clientId);
+        if (message.type === 'join-board') {
+          const boardId = Number(message.boardId);
+          currentBoardId = boardId;
+          console.log(`WS: User joined board ${boardId}`);
+          if (!boardRooms.has(boardId)) boardRooms.set(boardId, new Set());
+          boardRooms.get(boardId)!.add(ws);
+        }
+
+        if (message.type === 'board-update') {
+          console.log(`WS: Board ${currentBoardId} update received`);
+          if (currentBoardId && boardRooms.has(currentBoardId)) {
+            const room = boardRooms.get(currentBoardId)!;
+            console.log(`WS: Broadcasting update to ${room.size - 1} other clients`);
+            const payload = JSON.stringify(message);
+            room.forEach(client => {
+              if (client !== ws && client.readyState === WebSocket.OPEN) {
+                client.send(payload);
+              }
+            });
+          }
+        }
       });
 
-      // Remove from board rooms
-      if (currentBoardId && boardRooms.has(currentBoardId)) {
-        boardRooms.get(currentBoardId)!.delete(ws);
-        if (boardRooms.get(currentBoardId)!.size === 0) {
-          boardRooms.delete(currentBoardId);
-        }
-      }
-    });
-  });
+      ws.on('close', () => {
+        // Remove from clients map
+        clients.forEach((socket, clientId) => {
+          if (socket === ws) clients.delete(clientId);
+        });
 
-  function broadcastMessage(msg: any) {
-    const payload = JSON.stringify({ type: 'message', message: msg });
-    wss.clients.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(payload);
-      }
+        // Remove from board rooms
+        if (currentBoardId && boardRooms.has(currentBoardId)) {
+          boardRooms.get(currentBoardId)!.delete(ws);
+          if (boardRooms.get(currentBoardId)!.size === 0) {
+            boardRooms.delete(currentBoardId);
+          }
+        }
+      });
     });
+
+    broadcastMessage = (msg: any) => {
+      const payload = JSON.stringify({ type: 'message', message: msg });
+      wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(payload);
+        }
+      });
+    };
   }
 
   // Seed Data
