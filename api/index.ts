@@ -25,20 +25,37 @@ let isInitialized = false;
 
 async function ensureInitialized() {
     if (!isInitialized) {
-        await registerRoutes(httpServer, app);
+        try {
+            console.log("Initializing routes...");
+            await registerRoutes(httpServer, app);
+            console.log("Routes initialized successfully.");
 
-        app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
-            const status = err.status || err.statusCode || 500;
-            const message = err.message || "Internal Server Error";
-            if (res.headersSent) return next(err);
-            return res.status(status).json({ message });
-        });
+            app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+                const status = err.status || err.statusCode || 500;
+                const message = err.message || "Internal Server Error";
+                console.error("Handler error:", err);
+                if (res.headersSent) return next(err);
+                return res.status(status).json({ message, details: process.env.NODE_ENV !== "production" ? err.stack : undefined });
+            });
 
-        isInitialized = true;
+            isInitialized = true;
+        } catch (error) {
+            console.error("Critical error during initialization:", error);
+            throw error;
+        }
     }
 }
 
 export default async function handler(req: any, res: any) {
-    await ensureInitialized();
-    app(req, res);
+    try {
+        await ensureInitialized();
+        app(req, res);
+    } catch (error: any) {
+        console.error("Vercel handler crashed:", error);
+        res.status(500).json({
+            message: "Function Initialization Failed",
+            error: error.message,
+            stack: process.env.NODE_ENV !== "production" ? error.stack : undefined
+        });
+    }
 }

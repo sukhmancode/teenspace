@@ -29,6 +29,7 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   const isServerless = !!process.env.VERCEL;
+  let broadcastMessage: (msg: any) => void = (_msg: any) => { }; // no-op by default
   // === PEER SERVER SETUP ===
   const peerServer = ExpressPeerServer(httpServer, {
     path: "/"
@@ -588,7 +589,6 @@ export async function registerRoutes(
 
   // === WEBSOCKET SETUP ===
   // Skip WebSocket setup in serverless environments (Vercel) - requires persistent connections
-  let broadcastMessage: (msg: any) => void = (_msg: any) => { }; // no-op by default
 
   if (!isServerless) {
     const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
