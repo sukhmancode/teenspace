@@ -29,14 +29,10 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   // === PEER SERVER SETUP ===
-  // Skip PeerJS in serverless environments (Vercel) - requires persistent TCP connections
-  const isServerless = !!process.env.VERCEL || process.env.NODE_ENV === 'production' && !process.env.PORT;
-  if (!isServerless) {
-    const peerServer = ExpressPeerServer(httpServer, {
-      path: "/"
-    });
-    app.use("/peerjs", peerServer);
-  }
+  const peerServer = ExpressPeerServer(httpServer, {
+    path: "/"
+  });
+  app.use("/peerjs", peerServer);
 
   // === AUTH SETUP ===
   const PostgresqlStore = pgSession(session);
@@ -588,7 +584,7 @@ export async function registerRoutes(
   // === WEBSOCKET SETUP ===
   // Skip WebSocket setup in serverless environments (Vercel) - requires persistent connections
   let broadcastMessage: (msg: any) => void = (_msg: any) => { }; // no-op by default
-
+  //@ts-ignore
   if (!isServerless) {
     const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
