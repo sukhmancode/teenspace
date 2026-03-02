@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: teenspace-api
+    runtime: node
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        scope: build,runtime
+      - key: SESSION_SECRET
+        scope: runtime
+      - key: PORT
+        value: 10000
+    autoDeploy: false
