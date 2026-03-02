@@ -394,19 +394,23 @@ export async function registerRoutes(
 
       if (message.type === 'auth') {
         const userId = message.userId;
+        console.log(`WS: User ${userId} authenticated`);
         clients.set(userId, ws);
       }
 
       if (message.type === 'join-board') {
         const boardId = Number(message.boardId);
         currentBoardId = boardId;
+        console.log(`WS: User joined board ${boardId}`);
         if (!boardRooms.has(boardId)) boardRooms.set(boardId, new Set());
         boardRooms.get(boardId)!.add(ws);
       }
 
       if (message.type === 'board-update') {
+        console.log(`WS: Board ${currentBoardId} update received`);
         if (currentBoardId && boardRooms.has(currentBoardId)) {
           const room = boardRooms.get(currentBoardId)!;
+          console.log(`WS: Broadcasting update to ${room.size - 1} other clients`);
           const payload = JSON.stringify(message);
           room.forEach(client => {
             if (client !== ws && client.readyState === WebSocket.OPEN) {
