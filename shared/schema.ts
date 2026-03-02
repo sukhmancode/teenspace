@@ -12,7 +12,17 @@ export const users = pgTable("users", {
   bio: text("bio"),
   avatarUrl: text("avatar_url"),
   coverUrl: text("cover_url"),
+  studyModeEnabled: boolean("study_mode_enabled").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow(),
+});
+
+// === USER DAILY USAGE ===
+export const userDailyUsage = pgTable("user_daily_usage", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  date: timestamp("date").notNull().defaultNow(),
+  totalMinutes: integer("total_minutes").notNull().default(0),
+  isLocked: boolean("is_locked").notNull().default(false),
 });
 
 // (Move schemas to bottom)
@@ -22,6 +32,7 @@ export const posts = pgTable("posts", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull().references(() => users.id),
   content: text("content").notNull(),
+  category: text("category").default("general"), // "education", "general", "entertainment", etc.
   fontStyle: text("font_style").default("Inter"),
   backgroundColor: text("background_color").default("#ffffff"),
   originalPostId: integer("original_post_id"), // For reposts
@@ -118,6 +129,14 @@ export const usersRelations = relations(users, ({ many }) => ({
   reposts: many(reposts),
   followers: many(follows, { relationName: "followers" }),
   following: many(follows, { relationName: "following" }),
+  dailyUsage: many(userDailyUsage),
+}));
+
+export const userDailyUsageRelations = relations(userDailyUsage, ({ one }) => ({
+  user: one(users, {
+    fields: [userDailyUsage.userId],
+    references: [users.id],
+  }),
 }));
 
 export const postsRelations = relations(posts, ({ one, many }) => ({
@@ -231,6 +250,13 @@ export const insertBoardSchema = createInsertSchema(boards).pick({
   appState: true,
 });
 
+export const insertUserDailyUsageSchema = createInsertSchema(userDailyUsage).pick({
+  userId: true,
+  date: true,
+  totalMinutes: true,
+  isLocked: true,
+});
+
 // === TYPES ===
 export type User = {
   id: number;
@@ -240,6 +266,7 @@ export type User = {
   bio: string | null;
   avatarUrl: string | null;
   coverUrl: string | null;
+  studyModeEnabled: boolean;
   createdAt: Date | null;
 };
 
@@ -247,6 +274,7 @@ export type Post = {
   id: number;
   userId: number;
   content: string;
+  category: string | null;
   fontStyle: string | null;
   backgroundColor: string | null;
   originalPostId: number | null;
@@ -314,12 +342,21 @@ export type Board = {
   updatedAt: Date | null;
 };
 
+export type UserDailyUsage = {
+  id: number;
+  userId: number;
+  date: Date;
+  totalMinutes: number;
+  isLocked: boolean;
+};
+
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type InsertPost = z.infer<typeof insertPostSchema>;
 export type InsertComment = z.infer<typeof insertCommentSchema>;
 export type InsertRepost = z.infer<typeof insertRepostSchema>;
 export type InsertMessage = z.infer<typeof insertMessageSchema>;
 export type InsertBoard = z.infer<typeof insertBoardSchema>;
+export type InsertUserDailyUsage = z.infer<typeof insertUserDailyUsageSchema>;
 
 // Detailed types for frontend
 export type PostWithDetails = Post & {

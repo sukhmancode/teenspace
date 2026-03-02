@@ -1,6 +1,9 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { UsageService } from "./usage";
+import { StudyModeService } from "./study-mode";
+import { AnalyticsService } from "./analytics";
 import { api } from "@shared/routes";
 import { z } from "zod";
 import session from "express-session";
@@ -93,7 +96,59 @@ export async function registerRoutes(
     res.status(401).json({ message: "Unauthorized" });
   };
 
+  // Track usage for each API request
+  const trackUsage = (req: any, res: any, next: any) => {
+    if (!req.isAuthenticated() || req.path.startsWith("/api/auth")) {
+      return next();
+    }
+
+    const start = Date.now();
+    const originalJson = res.json;
+
+    res.json = function (bodyJson: any, ...args: any[]) {
+      const duration = Date.now() - start;
+      const userId = (req.user as any)?.id;
+
+      if (userId && duration > 0) {
+        // Fire and forget - don't wait for usage tracking to complete
+        UsageService.trackRequest(userId, duration).catch((err) => {
+          console.error("Failed to track usage:", err);
+        });
+      }
+
+      return originalJson.apply(res, [bodyJson, ...args]);
+    };
+
+    return next();
+  };
+
   // === ROUTES ===
+
+  // Register middleware for tracking usage and checking lock status
+  app.use("/api", trackUsage);
+  
+  // Middleware to check usage limits for authenticated routes (but not auth endpoints)
+  app.use((req: any, res: any, next: any) => {
+    // Skip auth endpoints
+    if (req.path.match(/^\/api\/auth\/.*/)) {
+      return next();
+    }
+    
+    // For all other endpoints, check if authenticated and not locked
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    UsageService.isUserLocked((req.user as any).id).then((isLocked) => {
+      if (isLocked) {
+        return res.status(403).json({ message: "Daily usage limit exceeded. Come back tomorrow." });
+      }
+      next();
+    }).catch((err) => {
+      console.error("Error checking user lock status:", err);
+      next();
+    });
+  });
 
   // Auth
   app.post(api.auth.register.path, async (req, res, next) => {
@@ -107,8 +162,13 @@ export async function registerRoutes(
       const hashedPassword = await hashPassword(input.password);
       const user = await storage.createUser({ ...input, password: hashedPassword });
 
-      req.login(user, (err) => {
+      req.login(user, async (err) => {
         if (err) return next(err);
+        
+        // Initialize daily usage and start tracking session
+        await UsageService.resetIfNewDay(user.id);
+        UsageService.startSession(user.id);
+        
         res.status(201).json({ id: user.id, username: user.username });
       });
     } catch (err) {
@@ -120,14 +180,27 @@ export async function registerRoutes(
     }
   });
 
-  app.post(api.auth.login.path, passport.authenticate("local"), (req, res) => {
+  app.post(api.auth.login.path, passport.authenticate("local"), async (req, res) => {
     const user = req.user as SchemaUser;
+    
+    // Reset usage if it's a new day and start tracking session
+    await UsageService.resetIfNewDay(user.id);
+    UsageService.startSession(user.id);
+    
     res.status(200).json({ id: user.id, username: user.username });
   });
 
   app.post(api.auth.logout.path, (req, res, next) => {
+    const userId = (req.user as any)?.id;
+    
     req.logout((err) => {
       if (err) return next(err);
+      
+      // End tracking session
+      if (userId) {
+        UsageService.endSession(userId);
+      }
+      
       res.sendStatus(200);
     });
   });
@@ -138,6 +211,133 @@ export async function registerRoutes(
       res.json(userWithoutPassword);
     } else {
       res.json(null);
+    }
+  });
+
+  // Daily Usage Endpoints
+  app.get("/api/usage", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = (req.user as any).id;
+      const usage = await UsageService.getUserDailyUsage(userId);
+      const remaining = await UsageService.getRemainingMinutes(userId);
+      const unlockTime = await UsageService.getTimeUntilUnlock(userId);
+
+      res.json({
+        totalMinutes: usage?.totalMinutes || 0,
+        isLocked: usage?.isLocked || false,
+        remainingMinutes: remaining,
+        unlockTime: unlockTime, // null if not locked, { hours, minutes } if locked
+      });
+    } catch (err) {
+      console.error("Failed to get usage info:", err);
+      res.status(500).json({ message: "Failed to get usage info" });
+    }
+  });
+
+  // Study Mode Endpoints
+  app.post("/api/study-mode/enable", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = (req.user as any).id;
+      const success = await StudyModeService.enableStudyMode(userId);
+      
+      if (success) {
+        res.json({ message: "Study mode enabled", studyModeEnabled: true });
+      } else {
+        res.status(500).json({ message: "Failed to enable study mode" });
+      }
+    } catch (err) {
+      console.error("Failed to enable study mode:", err);
+      res.status(500).json({ message: "Failed to enable study mode" });
+    }
+  });
+
+  app.post("/api/study-mode/disable", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = (req.user as any).id;
+      const success = await StudyModeService.disableStudyMode(userId);
+      
+      if (success) {
+        res.json({ message: "Study mode disabled", studyModeEnabled: false });
+      } else {
+        res.status(500).json({ message: "Failed to disable study mode" });
+      }
+    } catch (err) {
+      console.error("Failed to disable study mode:", err);
+      res.status(500).json({ message: "Failed to disable study mode" });
+    }
+  });
+
+  app.get("/api/study-mode/status", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = (req.user as any).id;
+      const isEnabled = await StudyModeService.isStudyModeEnabled(userId);
+      
+      res.json({ 
+        studyModeEnabled: isEnabled,
+        allowedCategories: StudyModeService.STUDY_MODE_ALLOWED_CATEGORIES
+      });
+    } catch (err) {
+      console.error("Failed to get study mode status:", err);
+      res.status(500).json({ message: "Failed to get study mode status" });
+    }
+  });
+
+  // Analytics Endpoints
+  app.get("/api/analytics/screen-time", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = (req.user as any).id;
+      const analytics = await AnalyticsService.getScreenTimeAnalytics(userId);
+      res.json(analytics);
+    } catch (err) {
+      console.error("Failed to get screen time analytics:", err);
+      res.status(500).json({ message: "Failed to get analytics" });
+    }
+  });
+
+  app.get("/api/analytics/daily-breakdown", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = (req.user as any).id;
+      const days = parseInt(req.query.days as string) || 30;
+      const breakdown = await AnalyticsService.getDailyBreakdown(userId, Math.min(days, 365));
+      res.json(breakdown);
+    } catch (err) {
+      console.error("Failed to get daily breakdown:", err);
+      res.status(500).json({ message: "Failed to get daily breakdown" });
+    }
+  });
+
+  app.get("/api/analytics/trend", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = (req.user as any).id;
+      const period = (req.query.period as 'week' | 'month') || 'week';
+      const trend = await AnalyticsService.getUsageTrend(userId, period);
+      res.json(trend);
+    } catch (err) {
+      console.error("Failed to get usage trend:", err);
+      res.status(500).json({ message: "Failed to get trend" });
+    }
+  });
+
+  app.get("/api/analytics/goals", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = (req.user as any).id;
+      const dailyLimit = parseInt(req.query.limit as string) || 120;
+      const progress = await AnalyticsService.getGoalProgress(userId, dailyLimit);
+      res.json(progress);
+    } catch (err) {
+      console.error("Failed to get goal progress:", err);
+      res.status(500).json({ message: "Failed to get goal progress" });
+    }
+  });
+
+  app.get("/api/analytics/health-score", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = (req.user as any).id;
+      const score = await AnalyticsService.getHealthScore(userId);
+      res.json({ score, max_score: 100 });
+    } catch (err) {
+      console.error("Failed to get health score:", err);
+      res.status(500).json({ message: "Failed to get health score" });
     }
   });
 
@@ -233,7 +433,9 @@ export async function registerRoutes(
   // Posts
   app.get(api.posts.list.path, isAuthenticated, async (req: any, res) => {
     const feed = (req.query.feed as 'latest' | 'following' | 'popular') || 'latest';
-    const posts = await storage.getPosts((req.user as any).id, feed);
+    const userId = (req.user as any).id;
+    const studyModeEnabled = await StudyModeService.isStudyModeEnabled(userId);
+    const posts = await storage.getPosts(userId, feed, studyModeEnabled);
     res.json(posts);
   });
 
