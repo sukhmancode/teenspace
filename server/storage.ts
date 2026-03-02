@@ -1,9 +1,9 @@
 import { db } from "./db";
 import {
-  users, posts, comments, likes, reposts, follows, blocks, conversations, messages, boards,
+  users, posts, comments, likes, reposts, follows, blocks, conversations, messages, boards, userDailyUsage,
   type User, type InsertUser, type Post, type InsertPost, type Comment, type InsertComment,
   type Like, type Repost, type InsertRepost, type Follow, type Block, type Conversation, type Message, type InsertMessage,
-  type Board, type InsertBoard,
+  type Board, type InsertBoard, type UserDailyUsage,
   type PostWithDetails
 } from "@shared/schema";
 import { eq, and, desc, sql, or, ne, inArray } from "drizzle-orm";
@@ -14,6 +14,7 @@ export interface IStorage {
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   searchUsers(query: string): Promise<User[]>;
+  updateUserStudyMode(userId: number, enabled: boolean): Promise<User>;
 
   // Follows/Blocks
   followUser(followerId: number, followingId: number): Promise<void>;
@@ -27,7 +28,7 @@ export interface IStorage {
   // Posts
   createPost(post: InsertPost & { userId: number }): Promise<Post>;
   getPost(id: number): Promise<Post | undefined>;
-  getPosts(currentUserId: number, feedType: 'latest' | 'following' | 'popular'): Promise<PostWithDetails[]>;
+  getPosts(currentUserId: number, feedType: 'latest' | 'following' | 'popular', studyModeEnabled?: boolean): Promise<PostWithDetails[]>;
   deletePost(id: number): Promise<void>;
 
   // Likes/Reposts
@@ -50,6 +51,20 @@ export interface IStorage {
   getBoard(id: number): Promise<Board | undefined>;
   getBoards(userId: number): Promise<Board[]>;
   updateBoard(id: number, data: Partial<Board>): Promise<Board>;
+
+  // Daily Usage
+  getOrCreateDailyUsage(userId: number): Promise<UserDailyUsage>;
+  updateUsageTime(userId: number, minutes: number): Promise<UserDailyUsage>;
+  isUserLocked(userId: number): Promise<boolean>;
+  resetDailyUsageIfNeeded(userId: number): Promise<UserDailyUsage>;
+
+  // Analytics
+  getTodayUsage(userId: number): Promise<number>;
+  getLast7DaysUsage(userId: number): Promise<number[]>;
+  getMonthlyTotalUsage(userId: number): Promise<number>;
+  getDailyBreakdown(userId: number, days: number): Promise<Array<{ date: string; totalMinutes: number }>>;
+  getCurrentPeriodTotal(userId: number, period: 'week' | 'month'): Promise<number>;
+  getPreviousPeriodTotal(userId: number, period: 'week' | 'month'): Promise<number>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -75,6 +90,14 @@ export class DatabaseStorage implements IStorage {
         sql`display_name ILIKE ${`%${query}%`}`
       ))
       .limit(10);
+  }
+
+  async updateUserStudyMode(userId: number, enabled: boolean): Promise<User> {
+    const [updatedUser] = await db.update(users)
+      .set({ studyModeEnabled: enabled })
+      .where(eq(users.id, userId))
+      .returning();
+    return updatedUser;
   }
 
   async followUser(followerId: number, followingId: number): Promise<void> {
@@ -131,7 +154,7 @@ export class DatabaseStorage implements IStorage {
     return post;
   }
 
-  async getPosts(currentUserId: number, feedType: 'latest' | 'following' | 'popular'): Promise<PostWithDetails[]> {
+  async getPosts(currentUserId: number, feedType: 'latest' | 'following' | 'popular', studyModeEnabled?: boolean): Promise<PostWithDetails[]> {
     let query = db.select().from(posts).leftJoin(users, eq(posts.userId, users.id));
 
     // Filter by blocked users
@@ -140,6 +163,12 @@ export class DatabaseStorage implements IStorage {
 
     if (blockedIds.length > 0) {
       query = query.where(not(inArray(posts.userId, blockedIds))) as any;
+    }
+
+    // Filter by study mode - only allow educational content
+    if (studyModeEnabled) {
+      const allowedCategories = ["education", "study-group", "homework"];
+      query = query.where(inArray(posts.category, allowedCategories)) as any;
     }
 
     if (feedType === 'following') {
@@ -319,6 +348,239 @@ export class DatabaseStorage implements IStorage {
       .where(eq(boards.id, id))
       .returning();
     return updated;
+  }
+
+  // Daily Usage Tracking
+  async getOrCreateDailyUsage(userId: number): Promise<UserDailyUsage> {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const [existing] = await db.select()
+      .from(userDailyUsage)
+      .where(
+        and(
+          eq(userDailyUsage.userId, userId),
+          sql`DATE(${userDailyUsage.date}) = DATE(${today})`
+        )
+      );
+
+    if (existing) {
+      return existing;
+    }
+
+    const [created] = await db.insert(userDailyUsage)
+      .values({ userId, date: today, totalMinutes: 0, isLocked: false })
+      .returning();
+    return created;
+  }
+
+  async resetDailyUsageIfNeeded(userId: number): Promise<UserDailyUsage> {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const [existing] = await db.select()
+      .from(userDailyUsage)
+      .where(
+        and(
+          eq(userDailyUsage.userId, userId),
+          sql`DATE(${userDailyUsage.date}) = DATE(${today})`
+        )
+      );
+
+    if (existing) {
+      return existing;
+    }
+
+    // Create new record for today
+    const [created] = await db.insert(userDailyUsage)
+      .values({ userId, date: today, totalMinutes: 0, isLocked: false })
+      .returning();
+    return created;
+  }
+
+  async updateUsageTime(userId: number, minutes: number): Promise<UserDailyUsage> {
+    const usage = await this.getOrCreateDailyUsage(userId);
+    const newTotal = usage.totalMinutes + minutes;
+    const isNowLocked = newTotal > 120; // 120 minute limit
+
+    const [updated] = await db.update(userDailyUsage)
+      .set({ 
+        totalMinutes: newTotal,
+        isLocked: isNowLocked
+      })
+      .where(eq(userDailyUsage.id, usage.id))
+      .returning();
+    return updated;
+  }
+
+  async isUserLocked(userId: number): Promise<boolean> {
+    const usage = await this.getOrCreateDailyUsage(userId);
+    return usage.isLocked;
+  }
+
+  // Analytics Methods
+  async getTodayUsage(userId: number): Promise<number> {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const [usage] = await db.select()
+      .from(userDailyUsage)
+      .where(
+        and(
+          eq(userDailyUsage.userId, userId),
+          sql`DATE(${userDailyUsage.date}) = DATE(${today})`
+        )
+      );
+
+    return usage?.totalMinutes || 0;
+  }
+
+  async getLast7DaysUsage(userId: number): Promise<number[]> {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const sevenDaysAgo = new Date(today);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+
+    const results = await db.select()
+      .from(userDailyUsage)
+      .where(
+        and(
+          eq(userDailyUsage.userId, userId),
+          sql`DATE(${userDailyUsage.date}) >= DATE(${sevenDaysAgo})`,
+          sql`DATE(${userDailyUsage.date}) <= DATE(${today})`
+        )
+      )
+      .orderBy(userDailyUsage.date);
+
+    // Create array with 7 elements, filling missing days with 0
+    const usage: number[] = Array(7).fill(0);
+    
+    results.forEach((record) => {
+      const recordDate = new Date(record.date);
+      recordDate.setHours(0, 0, 0, 0);
+      const daysAgo = Math.floor((today.getTime() - recordDate.getTime()) / (1000 * 60 * 60 * 24));
+      if (daysAgo >= 0 && daysAgo < 7) {
+        usage[6 - daysAgo] = record.totalMinutes;
+      }
+    });
+
+    return usage;
+  }
+
+  async getMonthlyTotalUsage(userId: number): Promise<number> {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [result] = await db.select({
+      total: sql<number>`COALESCE(SUM(${userDailyUsage.totalMinutes}), 0)`
+    })
+      .from(userDailyUsage)
+      .where(
+        and(
+          eq(userDailyUsage.userId, userId),
+          sql`DATE(${userDailyUsage.date}) >= DATE(${startOfMonth})`
+        )
+      );
+
+    return result?.total || 0;
+  }
+
+  async getDailyBreakdown(userId: number, days: number): Promise<Array<{ date: string; totalMinutes: number }>> {
+    const endDate = new Date();
+    endDate.setHours(0, 0, 0, 0);
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - (days - 1));
+
+    const results = await db.select({
+      date: sql<string>`DATE(${userDailyUsage.date})::text`,
+      totalMinutes: userDailyUsage.totalMinutes
+    })
+      .from(userDailyUsage)
+      .where(
+        and(
+          eq(userDailyUsage.userId, userId),
+          sql`DATE(${userDailyUsage.date}) >= DATE(${startDate})`,
+          sql`DATE(${userDailyUsage.date}) <= DATE(${endDate})`
+        )
+      )
+      .orderBy(sql`DATE(${userDailyUsage.date})`);
+
+    // Fill in missing days
+    const breakdown: Array<{ date: string; totalMinutes: number }> = [];
+    const resultMap = new Map(results.map(r => [r.date, r.totalMinutes]));
+
+    for (let i = 0; i < days; i++) {
+      const date = new Date(startDate);
+      date.setDate(date.getDate() + i);
+      const dateStr = date.toISOString().split('T')[0];
+      breakdown.push({
+        date: dateStr,
+        totalMinutes: resultMap.get(dateStr) || 0
+      });
+    }
+
+    return breakdown;
+  }
+
+  async getCurrentPeriodTotal(userId: number, period: 'week' | 'month'): Promise<number> {
+    const now = new Date();
+    const startDate = new Date();
+
+    if (period === 'week') {
+      const dayOfWeek = now.getDay();
+      startDate.setDate(now.getDate() - dayOfWeek);
+      startDate.setHours(0, 0, 0, 0);
+    } else {
+      startDate.setDate(1);
+      startDate.setHours(0, 0, 0, 0);
+    }
+
+    const [result] = await db.select({
+      total: sql<number>`COALESCE(SUM(${userDailyUsage.totalMinutes}), 0)`
+    })
+      .from(userDailyUsage)
+      .where(
+        and(
+          eq(userDailyUsage.userId, userId),
+          sql`DATE(${userDailyUsage.date}) >= DATE(${startDate})`
+        )
+      );
+
+    return result?.total || 0;
+  }
+
+  async getPreviousPeriodTotal(userId: number, period: 'week' | 'month'): Promise<number> {
+    const now = new Date();
+    let endDate = new Date();
+    const startDate = new Date();
+
+    if (period === 'week') {
+      const dayOfWeek = now.getDay();
+      endDate.setDate(now.getDate() - dayOfWeek - 1);
+      endDate.setHours(23, 59, 59, 999);
+      
+      startDate.setDate(endDate.getDate() - 6);
+      startDate.setHours(0, 0, 0, 0);
+    } else {
+      endDate = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+      startDate.setMonth(startDate.getMonth() - 1);
+      startDate.setDate(1);
+      startDate.setHours(0, 0, 0, 0);
+    }
+
+    const [result] = await db.select({
+      total: sql<number>`COALESCE(SUM(${userDailyUsage.totalMinutes}), 0)`
+    })
+      .from(userDailyUsage)
+      .where(
+        and(
+          eq(userDailyUsage.userId, userId),
+          sql`DATE(${userDailyUsage.date}) >= DATE(${startDate})`,
+          sql`DATE(${userDailyUsage.date}) <= DATE(${endDate})`
+        )
+      );
+
+    return result?.total || 0;
   }
 }
 
