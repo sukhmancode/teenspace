@@ -3,7 +3,8 @@ services:
     name: teenspace-api
     runtime: node
     region: oregon
-    buildCommand: npm install && npm run build
+    # install devDependencies during build so tools like `tsx` are available
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
