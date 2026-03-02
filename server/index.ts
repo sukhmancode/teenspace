@@ -3,6 +3,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import cors from "cors";
 
 const app = express();
 const httpServer = createServer(app);
@@ -22,6 +23,10 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+app.use(cors({
+  origin: true, // Allows all origins, you can restrict this later to your specific Vercel URL
+  credentials: true
+}));
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
