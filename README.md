@@ -117,40 +117,10 @@ For future evaluation, this design is intended to support:
 - Lower perceived distraction and stress related to social media use.  
 - Higher reported sense of safety and belonging within student communities.
 
----
 
-## To Be Completed – Tech Stack and Architecture
-
-(To be filled by the implementation team)
-
-- Frontend technologies  
-- Backend technologies  
-- Realtime and whiteboard technologies  
-- Authentication and security mechanisms  
-- High-level system architecture  
-
----
-
-## To Be Completed – Getting Started
-
-(To be filled by the implementation team)
-
-- Prerequisites  
-- Installation steps  
-- Running the application  
-- Demo credentials (if applicable)  
-
----
-
-## To Be Completed – Screenshots and Demo
-
-(To be filled by the implementation team)
-
-- Login page  
-- Collaborative whiteboard  
-- Study room interface  
 - Live demo link / video walkthrough  
 
 ---
 
 ## Future Work
+
