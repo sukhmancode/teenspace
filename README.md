@@ -118,9 +118,5 @@ For future evaluation, this design is intended to support:
 - Higher reported sense of safety and belonging within student communities.
 
 
-- Live demo link / video walkthrough  
 
----
-
-## Future Work
 
